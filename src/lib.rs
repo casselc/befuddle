@@ -1,4 +1,15 @@
-use std::convert::TryInto;
+use std::convert::{From, TryFrom, TryInto};
+use std::io;
+use std::fs;
+use std::path::PathBuf;
+use structopt::StructOpt;
+
+#[derive(Debug, StructOpt)]
+struct ExecOptions {
+    input_file: PathBuf,
+    output_file: PathBuf,
+    program: PathBuf,
+}
 
 #[derive(Clone, Copy, Debug)]
 struct BefungeCommand;
@@ -36,7 +47,7 @@ impl BefungeCommand {
 type BefungeCell = u8;
 
 #[derive(Clone, Debug)]
-struct BefungeField {
+pub struct BefungeField {
     width: usize,
     height: usize,
     cells: Vec<BefungeCell>,
@@ -111,13 +122,14 @@ enum Delta {
 }
 
 #[derive(Clone, Debug)]
-struct BefungeExecution {
+pub struct BefungeExecution {
     pc_x: usize,
     pc_y: usize,
     pc_delta: Delta,
     string_mode: bool,
     field: BefungeField,
     stack: Vec<i32>,
+    active: bool,
 }
 
 impl BefungeExecution {
@@ -129,10 +141,11 @@ impl BefungeExecution {
             string_mode: false,
             field,
             stack: Vec::new(),
+            active: true,
         }
     }
 
-    pub fn pc(&self) -> (usize, usize, Delta) {
+    fn pc(&self) -> (usize, usize, Delta) {
         (self.pc_x, self.pc_y, self.pc_delta)
     }
 
@@ -140,7 +153,7 @@ impl BefungeExecution {
         self.stack.clone()
     }
 
-    pub fn get(&self, x: usize, y: usize) -> Option<BefungeCell> {
+    fn get(&self, x: usize, y: usize) -> Option<BefungeCell> {
         self.field.get(x, y)
     }
 
@@ -177,126 +190,166 @@ impl BefungeExecution {
         }
     }
 
+    pub fn run(&mut self) {
+        while self.active {
+            self.step();
+        }
+    }
+
     pub fn step(&mut self) {
-        if let Some(curr) = self.field.get(self.pc_x, self.pc_y) {
-            if self.string_mode {
-                if curr == BefungeCommand::TOGGLE_STRING_MODE {
-                    self.string_mode = false;
+        if self.active {
+            if let Some(curr) = self.field.get(self.pc_x, self.pc_y) {
+                if self.string_mode {
+                    if curr == BefungeCommand::TOGGLE_STRING_MODE {
+                        self.string_mode = false;
+                    } else {
+                        self.stack.push(curr as i32);
+                    }
                 } else {
-                    self.stack.push(curr as i32);
-                }
-            } else {
-                match curr {
-                    BefungeCommand::NO_OP => {}
-                    BefungeCommand::NEGATE => {
-                        let top = self.stack.pop().unwrap_or_default();
+                    match curr {
+                        BefungeCommand::NO_OP => {}
+                        BefungeCommand::NEGATE => {
+                            let top = self.stack.pop().unwrap_or_default();
 
-                        self.stack.push(if top > 0 { 0 } else { 1 })
-                    }
-                    BefungeCommand::TOGGLE_STRING_MODE => self.string_mode = true,
-                    BefungeCommand::BRIDGE => {
-                        self.move_pc();
-                    }
-                    BefungeCommand::DISCARD => {
-                        let _top = self.stack.pop();
-                    }
-                    BefungeCommand::MODULO => {
-                        let top = self.stack.pop().unwrap_or_default();
-                        let second = self.stack.pop().unwrap_or_default();
-
-                        self.stack.push(top % second);
-                    }
-                    BefungeCommand::READ_INT => {}
-                    BefungeCommand::MULTIPLY => {
-                        let top = self.stack.pop().unwrap_or_default();
-                        let second = self.stack.pop().unwrap_or_default();
-
-                        self.stack.push(top * second);
-                    }
-                    BefungeCommand::ADD => {
-                        let top = self.stack.pop().unwrap_or_default();
-                        let second = self.stack.pop().unwrap_or_default();
-
-                        self.stack.push(top + second);
-                    }
-                    BefungeCommand::WRITE_CHAR => {}
-                    BefungeCommand::SUBTRACT => {
-                        let top = self.stack.pop().unwrap_or_default();
-                        let second = self.stack.pop().unwrap_or_default();
-
-                        self.stack.push(top - second);
-                    }
-                    BefungeCommand::WRITE_INT => {}
-                    BefungeCommand::DIVIDE => {
-                        let top = self.stack.pop().unwrap_or_default();
-                        let second = self.stack.pop().unwrap_or_default();
-
-                        self.stack.push(top / second);
-                    }
-                    BefungeCommand::DUPLICATE => {
-                        let top = self.stack.pop().unwrap_or_default();
-
-                        self.stack.push(top);
-                        self.stack.push(top);
-                    }
-                    BefungeCommand::LEFT => {
-                        self.pc_delta = Delta::Left;
-                    }
-                    BefungeCommand::RIGHT => {
-                        self.pc_delta = Delta::Right;
-                    }
-                    BefungeCommand::RANDOM => {}
-                    BefungeCommand::STOP => {}
-                    BefungeCommand::SWAP => {
-                        let top = self.stack.pop().unwrap_or_default();
-                        let second = self.stack.pop().unwrap_or_default();
-
-                        self.stack.push(top);
-                        self.stack.push(second);
-                    }
-                    BefungeCommand::UP => {
-                        self.pc_delta = Delta::Up;
-                    }
-                    BefungeCommand::IF_LEFT_RIGHT => {
-                        let top = self.stack.pop().unwrap_or_default();
-
-                        self.pc_delta = if top > 0 { Delta::Left } else { Delta::Right };
-                    }
-                    BefungeCommand::COMPARE => {
-                        let top = self.stack.pop().unwrap_or_default();
-                        let second = self.stack.pop().unwrap_or_default();
-
-                        self.stack.push(if top > second { 1 } else { 0 })
-                    }
-                    BefungeCommand::READ_CELL => {
-                        let top: usize = self.stack.pop().unwrap_or_default().try_into().unwrap();
-                        let second = self.stack.pop().unwrap_or_default().try_into().unwrap();
-
-                        if let Some(val) = self.field.get(second, top) {
-                            self.stack.push(val as i32)
+                            self.stack.push(if top > 0 { 0 } else { 1 })
                         }
-                    }
-                    BefungeCommand::WRITE_CELL => {
-                        let top = self.stack.pop().unwrap_or_default().try_into().unwrap();
-                        let second = self.stack.pop().unwrap_or_default().try_into().unwrap();
-                        let value = self.stack.pop().unwrap_or_default().try_into().unwrap();
+                        BefungeCommand::TOGGLE_STRING_MODE => self.string_mode = true,
+                        BefungeCommand::BRIDGE => {
+                            self.move_pc();
+                        }
+                        BefungeCommand::DISCARD => {
+                            let _top = self.stack.pop();
+                        }
+                        BefungeCommand::MODULO => {
+                            let top = self.stack.pop().unwrap_or_default();
+                            let second = self.stack.pop().unwrap_or_default();
 
-                        self.field.set(second, top, value);
-                    }
-                    BefungeCommand::DOWN => {
-                        self.pc_delta = Delta::Down;
-                    }
-                    BefungeCommand::IF_UP_DOWN => {
-                        let top = self.stack.pop().unwrap_or_default();
+                            self.stack.push(top % second);
+                        }
+                        BefungeCommand::READ_INT => {
+                            let mut input = String::new();
+                            io::stdin()
+                                .read_line(&mut input)
+                                .expect("Error reading integer");
 
-                        self.pc_delta = if top > 0 { Delta::Up } else { Delta::Down };
+                            let i = input.parse::<i32>().unwrap();
+                            self.stack.push(i);
+                        }
+                        BefungeCommand::MULTIPLY => {
+                            let top = self.stack.pop().unwrap_or_default();
+                            let second = self.stack.pop().unwrap_or_default();
+
+                            self.stack.push(top * second);
+                        }
+                        BefungeCommand::ADD => {
+                            let top = self.stack.pop().unwrap_or_default();
+                            let second = self.stack.pop().unwrap_or_default();
+
+                            self.stack.push(top + second);
+                        }
+                        BefungeCommand::WRITE_CHAR => {
+                            let top = self.stack.pop().unwrap_or_default();
+                            let u: u32 = top.try_into().unwrap();
+                            let c: char = u.try_into().unwrap();
+
+                            print!("{}", c);
+                        }
+                        BefungeCommand::SUBTRACT => {
+                            let top = self.stack.pop().unwrap_or_default();
+                            let second = self.stack.pop().unwrap_or_default();
+
+                            self.stack.push(top - second);
+                        }
+                        BefungeCommand::WRITE_INT => {
+                            let top = self.stack.pop().unwrap_or_default();
+
+                            print!("{}", top);
+                        }
+                        BefungeCommand::DIVIDE => {
+                            let top = self.stack.pop().unwrap_or_default();
+                            let second = self.stack.pop().unwrap_or_default();
+
+                            self.stack.push(top / second);
+                        }
+                        BefungeCommand::DUPLICATE => {
+                            let top = self.stack.pop().unwrap_or_default();
+
+                            self.stack.push(top);
+                            self.stack.push(top);
+                        }
+                        BefungeCommand::LEFT => {
+                            self.pc_delta = Delta::Left;
+                        }
+                        BefungeCommand::RIGHT => {
+                            self.pc_delta = Delta::Right;
+                        }
+                        BefungeCommand::RANDOM => {}
+                        BefungeCommand::STOP => {
+                            self.active = false;
+                        }
+                        BefungeCommand::SWAP => {
+                            let top = self.stack.pop().unwrap_or_default();
+                            let second = self.stack.pop().unwrap_or_default();
+
+                            self.stack.push(top);
+                            self.stack.push(second);
+                        }
+                        BefungeCommand::UP => {
+                            self.pc_delta = Delta::Up;
+                        }
+                        BefungeCommand::IF_LEFT_RIGHT => {
+                            let top = self.stack.pop().unwrap_or_default();
+
+                            self.pc_delta = if top > 0 { Delta::Left } else { Delta::Right };
+                        }
+                        BefungeCommand::COMPARE => {
+                            let top = self.stack.pop().unwrap_or_default();
+                            let second = self.stack.pop().unwrap_or_default();
+
+                            self.stack.push(if top > second { 1 } else { 0 })
+                        }
+                        BefungeCommand::READ_CELL => {
+                            let top: usize =
+                                self.stack.pop().unwrap_or_default().try_into().unwrap();
+                            let second = self.stack.pop().unwrap_or_default().try_into().unwrap();
+
+                            if let Some(val) = self.field.get(second, top) {
+                                self.stack.push(val as i32)
+                            }
+                        }
+                        BefungeCommand::WRITE_CELL => {
+                            let top = self.stack.pop().unwrap_or_default().try_into().unwrap();
+                            let second = self.stack.pop().unwrap_or_default().try_into().unwrap();
+                            let value = self.stack.pop().unwrap_or_default().try_into().unwrap();
+
+                            self.field.set(second, top, value);
+                        }
+                        BefungeCommand::DOWN => {
+                            self.pc_delta = Delta::Down;
+                        }
+                        BefungeCommand::IF_UP_DOWN => {
+                            let top = self.stack.pop().unwrap_or_default();
+
+                            self.pc_delta = if top > 0 { Delta::Up } else { Delta::Down };
+                        }
+                        BefungeCommand::READ_CHAR => {
+                            let mut input = String::new();
+                            print!("Enter a character: ");
+                            io::stdin()
+                                .read_line(&mut input)
+                                .expect("Error reading character");
+
+                            let c = input.as_bytes()[0];
+                            self.stack.push(c as i32);
+                        }
+                        b'0'..=b'9' => self.stack.push((curr - 48) as i32),
+                        _ => self.stack.push(curr as i32),
                     }
-                    BefungeCommand::READ_CHAR => {}
-                    b'0'..=b'9' => self.stack.push((curr - 48) as i32),
-                    _ => self.stack.push(curr as i32),
+                }
+                if self.active {
+                    self.move_pc();
                 }
             }
-            self.move_pc();
         }
     }
 }
@@ -580,5 +633,23 @@ mod tests {
         let (_x, y, delta) = exec.pc();
         assert_eq!(y, 1);
         assert_eq!(delta, Delta::Down);
+    }
+
+    #[test]
+    fn test_write_int() {
+        let mut exec = BefungeExecution::new(BefungeField::from_str("12..", 4, 1));
+        exec.step();
+        exec.step();
+        exec.step();
+        exec.step();
+    }
+
+    #[test]
+    fn test_write_char() {
+        let mut exec = BefungeExecution::new(BefungeField::from_str("\"a\",", 4, 1));
+        exec.step();
+        exec.step();
+        exec.step();
+        exec.step();
     }
 }
