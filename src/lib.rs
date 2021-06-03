@@ -1,8 +1,187 @@
-use std::convert::{From, TryFrom, TryInto};
+use std::collections::{BTreeMap, HashMap};
+use std::convert::{From, TryInto};
 use std::io;
-use std::fs;
 use std::path::PathBuf;
 use structopt::StructOpt;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+struct FungeCell(i32);
+
+impl Default for FungeCell {
+    fn default() -> Self {
+        Self(b' '.into())
+    }
+}
+
+impl From<i32> for FungeCell {
+    fn from(value: i32) -> Self {
+        FungeCell(value)
+    }
+}
+
+impl std::ops::Add<FungeCell> for FungeCell {
+    type Output = Self;
+    fn add(self, other: Self) -> Self {
+        Self(self.0 + other.0)
+    }
+}
+
+impl std::ops::Add<i32> for FungeCell {
+    type Output = Self;
+    fn add(self, other: i32) -> Self {
+        Self(self.0 + other)
+    }
+}
+
+impl std::ops::AddAssign<FungeCell> for FungeCell {
+    fn add_assign(&mut self, other: Self) {
+        self.0 += other.0
+    }
+}
+
+impl std::ops::Sub<FungeCell> for FungeCell {
+    type Output = Self;
+    fn sub(self, other: Self) -> Self {
+        Self(self.0 - other.0)
+    }
+}
+
+impl std::ops::SubAssign<FungeCell> for FungeCell {
+    fn sub_assign(&mut self, other: Self) {
+        self.0 -= other.0
+    }
+}
+
+impl std::ops::Mul<FungeCell> for FungeCell {
+    type Output = Self;
+    fn mul(self, other: Self) -> Self {
+        Self(self.0 * other.0)
+    }
+}
+
+impl std::ops::MulAssign<FungeCell> for FungeCell {
+    fn mul_assign(&mut self, other: Self) {
+        self.0 *= other.0
+    }
+}
+
+impl std::ops::Div<FungeCell> for FungeCell {
+    type Output = Self;
+    fn div(self, other: Self) -> Self {
+        Self(self.0 / other.0)
+    }
+}
+
+impl std::ops::DivAssign<FungeCell> for FungeCell {
+    fn div_assign(&mut self, other: Self) {
+        self.0 /= other.0
+    }
+}
+
+impl std::ops::Rem<FungeCell> for FungeCell {
+    type Output = Self;
+    fn rem(self, other: Self) -> Self {
+        Self(self.0 % other.0)
+    }
+}
+
+impl std::ops::RemAssign<FungeCell> for FungeCell {
+    fn rem_assign(&mut self, other: Self) {
+        self.0 %= other.0
+    }
+}
+
+#[derive(Debug, Clone)]
+struct FungeStack {
+    cells: Vec<FungeCell>,
+}
+
+impl FungeStack {
+    pub fn pop(&mut self) -> FungeCell {
+        self.cells.pop().unwrap_or_default()
+    }
+
+    pub fn push(&mut self, value: FungeCell) {
+        self.cells.push(value)
+    }
+}
+
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
+struct FungeCoordinate(i32, i32);
+
+impl FungeCoordinate {
+    const ORIGIN: FungeCoordinate = FungeCoordinate(0, 0);
+    const TOP_LEFT: FungeCoordinate = FungeCoordinate(FungeSpace::MIN_X, FungeSpace::MIN_Y);
+    const TOP_RIGHT: FungeCoordinate = FungeCoordinate(FungeSpace::MAX_X, FungeSpace::MIN_Y);
+    const BOTTOM_LEFT: FungeCoordinate = FungeCoordinate(FungeSpace::MIN_X, FungeSpace::MAX_Y);
+    const BOTTOM_RIGHT: FungeCoordinate = FungeCoordinate(FungeSpace::MAX_X, FungeSpace::MAX_Y);
+}
+
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
+struct FungeDelta(i32, i32);
+
+impl FungeDelta {
+    const NORTH: FungeDelta = FungeDelta(0, -1);
+    const SOUTH: FungeDelta = FungeDelta(0, 1);
+    const EAST: FungeDelta = FungeDelta(1, 0);
+    const WEST: FungeDelta = FungeDelta(-1, 0);
+    const NEGATE: FungeDelta = FungeDelta(-1, -1);
+}
+
+impl std::ops::Add<FungeDelta> for FungeCoordinate {
+    type Output = Self;
+    fn add(self, other: FungeDelta) -> Self {
+        Self(self.0 + other.0, self.1 + other.1)
+    }
+}
+
+impl std::ops::Mul<FungeDelta> for FungeCoordinate {
+    type Output = Self;
+    fn mul(self, other: FungeDelta) -> Self {
+        Self(self.0 * other.0, self.1 * other.1)
+    }
+}
+
+#[derive(Debug, Clone)]
+struct FungeSpace {
+    x_max: i32,
+    x_min: i32,
+    y_max: i32,
+    y_min: i32,
+    field: BTreeMap<FungeCoordinate, FungeCell>,
+}
+
+impl FungeSpace {
+    const MAX_X: i32 = i32::MAX;
+    const MAX_Y: i32 = i32::MAX;
+    const MIN_X: i32 = i32::MIN;
+    const MIN_Y: i32 = i32::MIN;
+
+    pub fn new() -> Self {
+        Self {
+            x_max: 0.into(),
+            x_min: 0.into(),
+            y_max: 0.into(),
+            y_min: 0.into(),
+            field: BTreeMap::new(),
+        }
+    }
+
+    pub fn upper_left(&self) -> FungeCoordinate {
+        FungeCoordinate(self.x_min, self.y_min)
+    }
+
+    pub fn lower_right(&self) -> FungeCoordinate {
+        FungeCoordinate(self.x_max, self.y_max)
+    }
+}
+
+struct FungePointer {
+    position: FungeCoordinate,
+    delta: FungeDelta,
+}
+
+impl FungePointer {}
 
 #[derive(Debug, StructOpt)]
 struct ExecOptions {
@@ -63,23 +242,19 @@ impl BefungeField {
     }
 
     fn load_str(&mut self, input: &str) {
-        let mut y = 0;
-        for line in input.lines() {
+        for (y, line) in input.lines().enumerate() {
             if y >= self.height {
                 break;
             }
 
-            let mut x = 0;
             let y_offset = y * self.width;
 
-            for c in line.chars() {
+            for (x, c) in line.chars().enumerate() {
                 if x >= self.width || c.len_utf8() > 1 {
                     break;
                 }
                 self.cells[x + y_offset] = c as u8;
-                x += 1;
             }
-            y += 1;
         }
     }
 
