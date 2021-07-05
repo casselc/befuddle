@@ -10,6 +10,6 @@ fn main() {
 
     let mut exec = BefungeExecution::new(BefungeField::from_str(&contents, 80,25));
 
-    exec.run();
+    exec.run_with_terminal();
     println!();
 }

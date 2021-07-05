@@ -1,7 +1,14 @@
+use crossterm::cursor::*;
+use crossterm::style::{
+    Attribute, Color, Print, ResetColor, SetAttribute, SetBackgroundColor, SetForegroundColor,
+};
+use crossterm::terminal::*;
+use crossterm::{queue, QueueableCommand, Result};
 use std::convert::{From, TryFrom, TryInto};
-use std::io;
-use std::fs;
+use std::io::{stdout, Write};
+use std::iter::FromIterator;
 use std::path::PathBuf;
+use std::{thread, time};
 use structopt::StructOpt;
 
 #[derive(Debug, StructOpt)]
@@ -44,7 +51,7 @@ impl BefungeCommand {
     const READ_CHAR: u8 = b'~';
 }
 
-type BefungeCell = u8;
+type BefungeCell = i32;
 
 #[derive(Clone, Debug)]
 pub struct BefungeField {
@@ -58,7 +65,7 @@ impl BefungeField {
         Self {
             width,
             height,
-            cells: vec![BefungeCommand::NO_OP as u8; width * height],
+            cells: vec![BefungeCommand::NO_OP as i32; width * height],
         }
     }
 
@@ -76,7 +83,7 @@ impl BefungeField {
                 if x >= self.width || c.len_utf8() > 1 {
                     break;
                 }
-                self.cells[x + y_offset] = c as u8;
+                self.cells[x + y_offset] = c as i32;
                 x += 1;
             }
             y += 1;
@@ -106,7 +113,7 @@ impl BefungeField {
         }
     }
 
-    pub fn set(&mut self, x: usize, y: usize, value: u8) {
+    pub fn set(&mut self, x: usize, y: usize, value: i32) {
         if x < self.width && y < self.height {
             self.cells[x + y * self.width] = value;
         }
@@ -121,7 +128,6 @@ enum Delta {
     Up,
 }
 
-#[derive(Clone, Debug)]
 pub struct BefungeExecution {
     pc_x: usize,
     pc_y: usize,
@@ -130,6 +136,385 @@ pub struct BefungeExecution {
     field: BefungeField,
     stack: Vec<i32>,
     active: bool,
+}
+
+pub trait FungeOutput {
+    fn write_character(&mut self, c: i32);
+    fn write_number(&mut self, num: i32);
+}
+
+pub trait FungeInput {
+    fn read_character(&mut self) -> i32;
+    fn read_number(&mut self) -> i32;
+}
+
+pub trait FungeRenderer: FungeInput + FungeOutput {
+    fn render_field(&mut self, cells: &Vec<i32>);
+
+    fn render_stack(&mut self, values: &Vec<i32>);
+
+    fn render_pointer(&mut self, pointer: (usize, usize));
+}
+
+pub struct TerminalRenderer {
+    field_width: u16,
+    field_height: u16,
+    term_width: u16,
+    term_height: u16,
+    prev_width: u16,
+    prev_height: u16,
+    output_position: (u16, u16),
+}
+
+impl TerminalRenderer {
+    const BOTTOM_LEFT_CORNER: char = '╚';
+    const TOP_LEFT_CORNER: char = '╔';
+    const TEE_BOTTOM: char = '╩';
+    const TEE_TOP: char = '╦';
+    const TEE_LEFT: char = '╠';
+    const HORIZONTAL_BORDER: char = '═';
+
+    const TOP_RIGHT_CORNER: char = '╗';
+    const BOTTOM_RIGHT_CORNER: char = '╝';
+    const VERTICAL_BORDER: char = '║';
+    const TEE_RIGHT: char = '╣';
+
+    pub fn new(field_width: u16, field_height: u16) -> Self {
+        let (prev_width, prev_height) = size().unwrap_or_default();
+        let (term_width, term_height) = (field_width + 13, field_height + 8);
+
+        TerminalRenderer {
+            field_width,
+            field_height,
+            term_width,
+            term_height,
+            prev_width,
+            prev_height,
+
+            output_position: (1, field_height + 2),
+        }
+    }
+
+    pub fn init(&mut self) -> () {
+        queue!(
+            stdout(),
+            DisableLineWrap,
+            Hide,
+            SetBackgroundColor(Color::DarkBlue),
+            SetForegroundColor(Color::White),
+            Clear(ClearType::All),
+            SetTitle("befuddle"),
+        )
+        .unwrap();
+
+        let mut line = vec![TerminalRenderer::HORIZONTAL_BORDER; self.term_width.into()];
+        line[0] = TerminalRenderer::TOP_LEFT_CORNER;
+        line[(self.field_width + 1) as usize] = TerminalRenderer::TEE_TOP;
+        line[(self.term_width - 1) as usize] = TerminalRenderer::TOP_RIGHT_CORNER;
+
+        let mut line_str = String::from_iter(&line);
+        queue!(stdout(), MoveTo(0, 0), Print(line_str)).unwrap();
+
+        for y in 1..=(self.field_height + 1) {
+            queue!(
+                stdout(),
+                MoveTo(0, y),
+                Print(TerminalRenderer::VERTICAL_BORDER),
+                MoveToColumn(self.field_width + 2),
+                Print(TerminalRenderer::VERTICAL_BORDER),
+                MoveToColumn(self.term_width),
+                Print(TerminalRenderer::VERTICAL_BORDER),
+            )
+            .unwrap();
+        }
+
+        line[0] = TerminalRenderer::TEE_LEFT;
+        line[(self.field_width + 1) as usize] = TerminalRenderer::TEE_BOTTOM;
+        line[(self.term_width - 1) as usize] = TerminalRenderer::TEE_RIGHT;
+
+        line_str = String::from_iter(&line);
+        queue!(stdout(), MoveTo(0, self.field_height + 1), Print(line_str),).unwrap();
+
+        for y in (self.field_height + 2)..self.term_height {
+            queue!(
+                stdout(),
+                MoveTo(0, y),
+                Print(TerminalRenderer::VERTICAL_BORDER),
+                MoveToColumn(self.term_width),
+                Print(TerminalRenderer::VERTICAL_BORDER),
+            );
+        }
+
+        line[0] = TerminalRenderer::BOTTOM_LEFT_CORNER;
+        line[(self.field_width + 1) as usize] = TerminalRenderer::HORIZONTAL_BORDER;
+        line[(self.term_width - 1) as usize] = TerminalRenderer::BOTTOM_RIGHT_CORNER;
+
+        line_str = String::from_iter(&line);
+        queue!(
+            stdout(),
+            MoveTo(0, self.term_height),
+            Print(line_str),
+            MoveTo(self.field_width + 2, 11),
+            Print(str::repeat(
+                &TerminalRenderer::HORIZONTAL_BORDER.to_string(),
+                10
+            )),
+            MoveTo(1, 1),
+            Show
+        );
+
+        stdout().flush().unwrap();
+    }
+
+    pub fn stop(&mut self) {
+        std::io::stdin().read_line(&mut String::new()).unwrap();
+        queue!(
+            stdout(),
+            ResetColor,
+            SetSize(self.prev_width, self.prev_height),
+            Clear(ClearType::All),
+        );
+
+        stdout().flush().unwrap();
+    }
+}
+
+impl FungeInput for PrintlnRenderer {
+    fn read_character(&mut self) -> i32 {
+        print!("\nEnter a character, followed by return/enter: ");
+        let mut input = String::new();
+        std::io::stdin()
+            .read_line(&mut input)
+            .expect("Error reading character");
+
+        let c = input.as_bytes()[0];
+        c as i32
+    }
+
+    fn read_number(&mut self) -> i32 {
+        print!("\nEnter a number, followed by return/enter: ");
+        let mut input = String::new();
+        std::io::stdin()
+            .read_line(&mut input)
+            .expect("Error reading integer");
+
+        let i = input.parse::<i32>().unwrap();
+        i
+    }
+}
+
+impl FungeOutput for PrintlnRenderer {
+    fn write_character(&mut self, c: i32) {
+        if let Ok(b) = u8::try_from(c) {
+            println!("Output: {}", unsafe {
+                std::char::from_u32_unchecked(b.into())
+            })
+        } else {
+            println!("Output: ");
+        }
+    }
+
+    fn write_number(&mut self, num: i32) {
+        println!("Output: {}", num);
+    }
+}
+
+impl FungeOutput for TerminalRenderer {
+    fn write_character(&mut self, c: i32) {
+        let output = &mut stdout();
+        let (x, y) = self.output_position;
+        if let Ok(b) = u8::try_from(c) {
+            queue!(
+                output,
+                SavePosition,
+                Hide,
+                MoveTo(x, y),
+                Print(unsafe { std::char::from_u32_unchecked(b.into()) }),
+                RestorePosition,
+                Show
+            );
+        }
+
+        self.output_position = if c != 13 && x < self.field_width {
+            (x + 1, y)
+        } else {
+            (1, y + 1)
+        };
+
+        output.flush().unwrap();
+    }
+
+    fn write_number(&mut self, num: i32) {
+        let output = &mut stdout();
+        let (x, y) = self.output_position;
+        let display_num = num.to_string();
+        let next_x = x + 1 + display_num.len() as u16;
+        let excess_chars: i32 = 0; //(next_x - self.field_width).into();
+        queue!(output, SavePosition, Hide, MoveTo(x, y));
+
+        if excess_chars > 0 {
+            queue!(
+                output,
+                Print(&display_num[0..(display_num.len() - excess_chars as usize)]),
+                MoveTo(1, y + 1),
+                Print(&display_num[(display_num.len() - excess_chars as usize)..display_num.len()])
+            );
+            self.output_position = (excess_chars as u16 + 2, y + 1);
+        } else {
+            queue!(output, Print(&display_num));
+            self.output_position = (x + display_num.len() as u16, y);
+        }
+        queue!(output, RestorePosition, Show);
+        output.flush().unwrap();
+    }
+}
+
+impl FungeInput for TerminalRenderer {
+    fn read_character(&mut self) -> i32 {
+        queue!(
+            stdout(),
+            SavePosition,
+            MoveTo(1, self.output_position.1 + 1),
+            Print("Type a character and press Enter: ")
+        )
+        .unwrap();
+        stdout().flush().unwrap();
+        let mut input = String::new();
+        std::io::stdin()
+            .read_line(&mut input)
+            .expect("Error reading character");
+
+        let c = input.as_bytes()[0];
+        queue!(
+            stdout(),
+            Hide,
+            MoveTo(0, self.output_position.1 + 1),
+            Clear(ClearType::CurrentLine),
+            Print(TerminalRenderer::VERTICAL_BORDER),
+            MoveTo(self.term_width-1, self.output_position.1 + 1),
+            Print(TerminalRenderer::VERTICAL_BORDER),
+            RestorePosition
+        );
+        stdout().flush().unwrap();
+        c as i32
+    }
+
+    fn read_number(&mut self) -> i32 {
+        queue!(
+            stdout(),
+            SavePosition,
+            MoveTo(1, self.output_position.1 + 1),
+            Print("Type a number and press Enter: ")
+        )
+        .unwrap();
+        stdout().flush().unwrap();
+        let mut input = String::new();
+        std::io::stdin()
+            .read_line(&mut input)
+            .expect("Error reading integer");
+        println!("{:#?}", input);
+        let i = input.trim_end().parse::<i32>().unwrap();
+        queue!(
+            stdout(),
+            Hide,
+            MoveTo(0, self.output_position.1 + 1),
+            Clear(ClearType::CurrentLine),
+            Print(TerminalRenderer::VERTICAL_BORDER),
+            MoveTo(self.term_width, self.output_position.1 + 1),
+            Print(TerminalRenderer::VERTICAL_BORDER),
+            RestorePosition
+        );
+        stdout().flush().unwrap();
+        i
+    }
+}
+
+impl FungeRenderer for TerminalRenderer {
+    fn render_field(&mut self, cells: &Vec<i32>) {
+        queue!(
+            stdout(),
+            SavePosition,
+            Hide,
+            SetForegroundColor(Color::DarkGrey),
+            MoveTo(1, 1)
+        );
+        for line in cells.chunks(80) {
+            let bytes = line.iter().map(|c| *c as u8).collect::<Vec<u8>>();
+            let to_print = std::str::from_utf8(&bytes).unwrap();
+            queue!(
+                stdout(),
+                MoveToColumn(2),
+                Print(to_print),
+                MoveToNextLine(1)
+            );
+        }
+        queue!(
+            stdout(),
+            RestorePosition,
+            SetForegroundColor(Color::White),
+            Show
+        );
+
+        stdout().flush().unwrap();
+    }
+
+    fn render_pointer(&mut self, pointer: (usize, usize)) {
+        queue!(
+            stdout(),
+            Hide,
+            MoveTo(5, self.field_height + 1),
+            Print(format!(" [ {:2}, {:2} ] ", pointer.0, pointer.1)),
+            MoveTo(pointer.0 as u16 + 1, pointer.1 as u16 + 1),
+            Show
+        );
+
+        stdout().flush().unwrap();
+    }
+    fn render_stack(&mut self, values: &Vec<i32>) {
+        queue!(stdout(), SavePosition, Hide);
+
+        let val_count = values.len().min(10);
+
+        for (i, v) in values.iter().take(val_count).enumerate() {
+            queue!(
+                stdout(),
+                MoveTo(self.field_width + 2, (10 - i) as u16),
+                Print(format!("{:10}", v))
+            );
+        }
+        for i in 0..(10 - val_count) {
+            queue!(
+                stdout(),
+                MoveTo(self.field_width + 2, 1 + i as u16),
+                Print("          ")
+            );
+        }
+        queue!(stdout(), RestorePosition, Show);
+        stdout().flush().unwrap();
+    }
+}
+pub struct PrintlnRenderer {}
+
+impl PrintlnRenderer {}
+
+impl FungeRenderer for PrintlnRenderer {
+    fn render_field(&mut self, cells: &Vec<i32>) {
+        for line in cells.chunks(80) {
+            let bytes = line.iter().map(|c| *c as u8).collect::<Vec<u8>>();
+            let to_print = unsafe { std::str::from_utf8_unchecked(&bytes) };
+            println!("{}", to_print);
+        }
+
+        //println!("Field: {:#?}", cells)
+    }
+
+    fn render_stack(&mut self, values: &Vec<i32>) {
+        println!("Stack: {:#?}", values)
+    }
+
+    fn render_pointer(&mut self, pointer: (usize, usize)) {
+        println!("Pointer: {:#?}", pointer)
+    }
 }
 
 impl BefungeExecution {
@@ -196,22 +581,54 @@ impl BefungeExecution {
         }
     }
 
+    pub fn run_with_renderer(&mut self, renderer: &mut dyn FungeRenderer) {
+        renderer.render_field(&self.field.cells);
+        while self.active {
+            renderer.render_stack(&self.stack);
+            renderer.render_pointer((self.pc_x, self.pc_y));
+            self.step();
+        }
+    }
+
+    pub fn run_with_terminal(&mut self) {
+        let mut term = TerminalRenderer::new(80, 25);
+
+        term.init();
+        term.render_field(&self.field.cells);
+        term.render_pointer((self.pc_x, self.pc_y));
+
+        while self.active {
+            // term.render_stack(&self.stack);
+            // term.render_pointer((self.pc_x, self.pc_y));
+            self.step_and_render(&mut term);
+            thread::sleep_ms(250);
+        }
+
+        term.stop();
+    }
+
     pub fn step(&mut self) {
+        self.step_and_render(&mut PrintlnRenderer {});
+    }
+
+    pub fn step_and_render(&mut self, renderer: &mut dyn FungeRenderer) {
         if self.active {
+            renderer.render_pointer((self.pc_x, self.pc_y));
+            renderer.render_stack(&self.stack);
             if let Some(curr) = self.field.get(self.pc_x, self.pc_y) {
                 if self.string_mode {
-                    if curr == BefungeCommand::TOGGLE_STRING_MODE {
+                    if curr == BefungeCommand::TOGGLE_STRING_MODE.into() {
                         self.string_mode = false;
                     } else {
                         self.stack.push(curr as i32);
                     }
                 } else {
-                    match curr {
+                    match curr as u8 {
                         BefungeCommand::NO_OP => {}
                         BefungeCommand::NEGATE => {
                             let top = self.stack.pop().unwrap_or_default();
 
-                            self.stack.push(if top > 0 { 0 } else { 1 })
+                            self.stack.push(if top > 0 { 0 } else { 1 });
                         }
                         BefungeCommand::TOGGLE_STRING_MODE => self.string_mode = true,
                         BefungeCommand::BRIDGE => {
@@ -227,12 +644,7 @@ impl BefungeExecution {
                             self.stack.push(top % second);
                         }
                         BefungeCommand::READ_INT => {
-                            let mut input = String::new();
-                            io::stdin()
-                                .read_line(&mut input)
-                                .expect("Error reading integer");
-
-                            let i = input.parse::<i32>().unwrap();
+                            let i = renderer.read_number();
                             self.stack.push(i);
                         }
                         BefungeCommand::MULTIPLY => {
@@ -249,10 +661,7 @@ impl BefungeExecution {
                         }
                         BefungeCommand::WRITE_CHAR => {
                             let top = self.stack.pop().unwrap_or_default();
-                            let u: u32 = top.try_into().unwrap();
-                            let c: char = u.try_into().unwrap();
-
-                            print!("{}", c);
+                            renderer.write_character(top);
                         }
                         BefungeCommand::SUBTRACT => {
                             let top = self.stack.pop().unwrap_or_default();
@@ -262,8 +671,7 @@ impl BefungeExecution {
                         }
                         BefungeCommand::WRITE_INT => {
                             let top = self.stack.pop().unwrap_or_default();
-
-                            print!("{}", top);
+                            renderer.write_number(top);
                         }
                         BefungeCommand::DIVIDE => {
                             let top = self.stack.pop().unwrap_or_default();
@@ -306,7 +714,7 @@ impl BefungeExecution {
                             let top = self.stack.pop().unwrap_or_default();
                             let second = self.stack.pop().unwrap_or_default();
 
-                            self.stack.push(if top > second { 1 } else { 0 })
+                            self.stack.push(if top > second { 1 } else { 0 });
                         }
                         BefungeCommand::READ_CELL => {
                             let top: usize =
@@ -323,6 +731,7 @@ impl BefungeExecution {
                             let value = self.stack.pop().unwrap_or_default().try_into().unwrap();
 
                             self.field.set(second, top, value);
+                            renderer.render_field(&self.field.cells);
                         }
                         BefungeCommand::DOWN => {
                             self.pc_delta = Delta::Down;
@@ -333,16 +742,12 @@ impl BefungeExecution {
                             self.pc_delta = if top > 0 { Delta::Up } else { Delta::Down };
                         }
                         BefungeCommand::READ_CHAR => {
-                            let mut input = String::new();
-                            print!("Enter a character: ");
-                            io::stdin()
-                                .read_line(&mut input)
-                                .expect("Error reading character");
-
-                            let c = input.as_bytes()[0];
-                            self.stack.push(c as i32);
+                            let c = renderer.read_character();
+                            self.stack.push(c);
                         }
-                        b'0'..=b'9' => self.stack.push((curr - 48) as i32),
+                        b'0'..=b'9' => {
+                            self.stack.push((curr - 48) as i32);
+                        }
                         _ => self.stack.push(curr as i32),
                     }
                 }
