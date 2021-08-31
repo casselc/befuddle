@@ -1,0 +1,1 @@
+pub type FungeStack = Vec<i32>;

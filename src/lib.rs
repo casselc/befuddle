@@ -1,14 +1,18 @@
+pub mod field;
+pub mod ops;
+pub mod pointer;
+pub mod stack;
+
+use crate::field::{BefungeCell, FungeField};
 use crossterm::cursor::*;
-use crossterm::style::{
-    Attribute, Color, Print, ResetColor, SetAttribute, SetBackgroundColor, SetForegroundColor,
-};
+use crossterm::queue;
+use crossterm::style::{Color, Print, ResetColor, SetBackgroundColor, SetForegroundColor};
 use crossterm::terminal::*;
-use crossterm::{queue, QueueableCommand, Result};
 use std::convert::{From, TryFrom, TryInto};
 use std::io::{stdout, Write};
 use std::iter::FromIterator;
 use std::path::PathBuf;
-use std::{thread, time};
+use std::thread;
 use structopt::StructOpt;
 
 #[derive(Debug, StructOpt)]
@@ -51,75 +55,6 @@ impl BefungeCommand {
     const READ_CHAR: u8 = b'~';
 }
 
-type BefungeCell = i32;
-
-#[derive(Clone, Debug)]
-pub struct BefungeField {
-    width: usize,
-    height: usize,
-    cells: Vec<BefungeCell>,
-}
-
-impl BefungeField {
-    pub fn new(width: usize, height: usize) -> Self {
-        Self {
-            width,
-            height,
-            cells: vec![BefungeCommand::NO_OP as i32; width * height],
-        }
-    }
-
-    fn load_str(&mut self, input: &str) {
-        let mut y = 0;
-        for line in input.lines() {
-            if y >= self.height {
-                break;
-            }
-
-            let mut x = 0;
-            let y_offset = y * self.width;
-
-            for c in line.chars() {
-                if x >= self.width || c.len_utf8() > 1 {
-                    break;
-                }
-                self.cells[x + y_offset] = c as i32;
-                x += 1;
-            }
-            y += 1;
-        }
-    }
-
-    pub fn from_str(input: &str, width: usize, height: usize) -> Self {
-        let mut field = BefungeField::new(width, height);
-        field.load_str(input);
-
-        field
-    }
-
-    pub fn width(&self) -> usize {
-        self.width
-    }
-
-    pub fn height(&self) -> usize {
-        self.height
-    }
-
-    pub fn get(&self, x: usize, y: usize) -> Option<BefungeCell> {
-        if x < self.width && y < self.height {
-            Some(self.cells[x + y * self.width])
-        } else {
-            None
-        }
-    }
-
-    pub fn set(&mut self, x: usize, y: usize, value: i32) {
-        if x < self.width && y < self.height {
-            self.cells[x + y * self.width] = value;
-        }
-    }
-}
-
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Delta {
     Right,
@@ -133,7 +68,7 @@ pub struct BefungeExecution {
     pc_y: usize,
     pc_delta: Delta,
     string_mode: bool,
-    field: BefungeField,
+    field: FungeField,
     stack: Vec<i32>,
     active: bool,
 }
@@ -391,7 +326,7 @@ impl FungeInput for TerminalRenderer {
             MoveTo(0, self.output_position.1 + 1),
             Clear(ClearType::CurrentLine),
             Print(TerminalRenderer::VERTICAL_BORDER),
-            MoveTo(self.term_width-1, self.output_position.1 + 1),
+            MoveTo(self.term_width - 1, self.output_position.1 + 1),
             Print(TerminalRenderer::VERTICAL_BORDER),
             RestorePosition
         );
@@ -518,7 +453,7 @@ impl FungeRenderer for PrintlnRenderer {
 }
 
 impl BefungeExecution {
-    pub fn new(field: BefungeField) -> Self {
+    pub fn new(field: FungeField) -> Self {
         Self {
             pc_x: 0,
             pc_y: 0,
@@ -764,7 +699,7 @@ mod tests {
     use super::*;
     #[test]
     fn test_empty_field() {
-        let field = BefungeField::new(80, 25);
+        let field = FungeField::new(80, 25);
         assert_eq!(field.get(0, 0), Some(BefungeCommand::NO_OP));
         assert_eq!(field.get(79, 24), Some(BefungeCommand::NO_OP));
         assert_eq!(field.get(80, 0), None);
@@ -772,7 +707,7 @@ mod tests {
 
     #[test]
     fn test_string_field() {
-        let field = BefungeField::from_str("0\n1\n", 80, 25);
+        let field = FungeField::from_str("0\n1\n", 80, 25);
         assert_eq!(field.get(0, 0), Some(b'0'));
         assert_eq!(field.get(1, 0), Some(b' '));
         assert_eq!(field.get(0, 1), Some(b'1'));
@@ -782,7 +717,7 @@ mod tests {
 
     #[test]
     fn test_truncate() {
-        let field = BefungeField::from_str("012\n01\n01", 2, 2);
+        let field = FungeField::from_str("012\n01\n01", 2, 2);
         assert_eq!(field.get(0, 0), Some(b'0'));
         assert_eq!(field.get(1, 0), Some(b'1'));
         assert_eq!(field.get(2, 0), None);
@@ -793,7 +728,7 @@ mod tests {
 
     #[test]
     fn test_horizontal_wrap_right() {
-        let mut exec = BefungeExecution::new(BefungeField::new(2, 1));
+        let mut exec = BefungeExecution::new(FungeField::new(2, 1));
         exec.step();
         let (x, _y, _delta) = exec.pc();
         assert_eq!(x, 1);
@@ -807,7 +742,7 @@ mod tests {
 
     #[test]
     fn test_horizontal_wrap_left() {
-        let mut exec = BefungeExecution::new(BefungeField::from_str("<", 3, 1));
+        let mut exec = BefungeExecution::new(FungeField::from_str("<", 3, 1));
         exec.step();
         let (x, _y, _delta) = exec.pc();
         assert_eq!(x, 2);
@@ -821,7 +756,7 @@ mod tests {
 
     #[test]
     fn test_vertical_wrap_down() {
-        let mut exec = BefungeExecution::new(BefungeField::from_str("v", 1, 2));
+        let mut exec = BefungeExecution::new(FungeField::from_str("v", 1, 2));
         exec.step();
         let (_x, y, _delta) = exec.pc();
         assert_eq!(y, 1);
@@ -835,7 +770,7 @@ mod tests {
 
     #[test]
     fn test_vertical_wrap_up() {
-        let mut exec = BefungeExecution::new(BefungeField::from_str("^", 1, 2));
+        let mut exec = BefungeExecution::new(FungeField::from_str("^", 1, 2));
         exec.step();
         let (_x, y, _delta) = exec.pc();
         assert_eq!(y, 1);
@@ -849,7 +784,7 @@ mod tests {
 
     #[test]
     fn test_push_digits() {
-        let mut exec = BefungeExecution::new(BefungeField::from_str("0123456789", 10, 1));
+        let mut exec = BefungeExecution::new(FungeField::from_str("0123456789", 10, 1));
 
         for _i in 0..10 {
             exec.step()
@@ -860,7 +795,7 @@ mod tests {
 
     #[test]
     fn test_string_mode() {
-        let mut exec = BefungeExecution::new(BefungeField::from_str("\"0123456789\"0", 13, 1));
+        let mut exec = BefungeExecution::new(FungeField::from_str("\"0123456789\"0", 13, 1));
 
         for _i in 0..13 {
             exec.step()
@@ -874,7 +809,7 @@ mod tests {
 
     #[test]
     fn test_read_cell() {
-        let mut exec = BefungeExecution::new(BefungeField::from_str("g", 1, 1));
+        let mut exec = BefungeExecution::new(FungeField::from_str("g", 1, 1));
 
         exec.step();
 
@@ -883,7 +818,7 @@ mod tests {
 
     #[test]
     fn test_write_cell() {
-        let mut exec = BefungeExecution::new(BefungeField::from_str("p", 1, 1));
+        let mut exec = BefungeExecution::new(FungeField::from_str("p", 1, 1));
 
         exec.step();
 
@@ -892,7 +827,7 @@ mod tests {
 
     #[test]
     fn test_negate() {
-        let mut exec = BefungeExecution::new(BefungeField::from_str("!!", 2, 1));
+        let mut exec = BefungeExecution::new(FungeField::from_str("!!", 2, 1));
 
         exec.step();
         assert_eq!(exec.stack(), vec![1]);
@@ -902,7 +837,7 @@ mod tests {
 
     #[test]
     fn test_swap() {
-        let mut exec = BefungeExecution::new(BefungeField::from_str("01\\", 3, 1));
+        let mut exec = BefungeExecution::new(FungeField::from_str("01\\", 3, 1));
 
         exec.step();
         exec.step();
@@ -912,7 +847,7 @@ mod tests {
 
     #[test]
     fn test_add() {
-        let mut exec = BefungeExecution::new(BefungeField::from_str("12+", 3, 1));
+        let mut exec = BefungeExecution::new(FungeField::from_str("12+", 3, 1));
 
         exec.step();
         exec.step();
@@ -922,7 +857,7 @@ mod tests {
 
     #[test]
     fn test_subtract() {
-        let mut exec = BefungeExecution::new(BefungeField::from_str("12-", 3, 1));
+        let mut exec = BefungeExecution::new(FungeField::from_str("12-", 3, 1));
 
         exec.step();
         exec.step();
@@ -932,7 +867,7 @@ mod tests {
 
     #[test]
     fn test_multiply() {
-        let mut exec = BefungeExecution::new(BefungeField::from_str("12*", 3, 1));
+        let mut exec = BefungeExecution::new(FungeField::from_str("12*", 3, 1));
 
         exec.step();
         exec.step();
@@ -942,7 +877,7 @@ mod tests {
 
     #[test]
     fn test_divide() {
-        let mut exec = BefungeExecution::new(BefungeField::from_str("12/", 3, 1));
+        let mut exec = BefungeExecution::new(FungeField::from_str("12/", 3, 1));
 
         exec.step();
         exec.step();
@@ -952,7 +887,7 @@ mod tests {
 
     #[test]
     fn test_modulo() {
-        let mut exec = BefungeExecution::new(BefungeField::from_str("23%", 3, 1));
+        let mut exec = BefungeExecution::new(FungeField::from_str("23%", 3, 1));
 
         exec.step();
         exec.step();
@@ -962,14 +897,14 @@ mod tests {
 
     #[test]
     fn test_compare() {
-        let mut exec = BefungeExecution::new(BefungeField::from_str("12`", 3, 1));
+        let mut exec = BefungeExecution::new(FungeField::from_str("12`", 3, 1));
 
         exec.step();
         exec.step();
         exec.step();
         assert_eq!(exec.stack(), vec![1]);
 
-        let mut exec = BefungeExecution::new(BefungeField::from_str("21`", 3, 1));
+        let mut exec = BefungeExecution::new(FungeField::from_str("21`", 3, 1));
 
         exec.step();
         exec.step();
@@ -979,7 +914,7 @@ mod tests {
 
     #[test]
     fn test_duplicate() {
-        let mut exec = BefungeExecution::new(BefungeField::from_str("1:", 2, 1));
+        let mut exec = BefungeExecution::new(FungeField::from_str("1:", 2, 1));
 
         exec.step();
         exec.step();
@@ -988,7 +923,7 @@ mod tests {
 
     #[test]
     fn test_discard() {
-        let mut exec = BefungeExecution::new(BefungeField::from_str("1$", 2, 1));
+        let mut exec = BefungeExecution::new(FungeField::from_str("1$", 2, 1));
 
         exec.step();
         assert_eq!(exec.stack(), vec![1]);
@@ -998,7 +933,7 @@ mod tests {
 
     #[test]
     fn test_if_left_right() {
-        let mut exec = BefungeExecution::new(BefungeField::from_str("1_", 2, 1));
+        let mut exec = BefungeExecution::new(FungeField::from_str("1_", 2, 1));
 
         exec.step();
         assert_eq!(exec.stack(), vec![1]);
@@ -1008,7 +943,7 @@ mod tests {
         assert_eq!(x, 0);
         assert_eq!(delta, Delta::Left);
 
-        let mut exec = BefungeExecution::new(BefungeField::from_str("0_", 2, 1));
+        let mut exec = BefungeExecution::new(FungeField::from_str("0_", 2, 1));
         exec.step();
         assert_eq!(exec.stack(), vec![0]);
         exec.step();
@@ -1020,7 +955,7 @@ mod tests {
 
     #[test]
     fn test_if_up_down() {
-        let mut exec = BefungeExecution::new(BefungeField::from_str("1|", 2, 2));
+        let mut exec = BefungeExecution::new(FungeField::from_str("1|", 2, 2));
 
         exec.step();
         assert_eq!(exec.stack(), vec![1]);
@@ -1030,7 +965,7 @@ mod tests {
         assert_eq!(y, 1);
         assert_eq!(delta, Delta::Up);
 
-        let mut exec = BefungeExecution::new(BefungeField::from_str("0|", 2, 2));
+        let mut exec = BefungeExecution::new(FungeField::from_str("0|", 2, 2));
         exec.step();
         assert_eq!(exec.stack(), vec![0]);
         exec.step();
@@ -1042,7 +977,7 @@ mod tests {
 
     #[test]
     fn test_write_int() {
-        let mut exec = BefungeExecution::new(BefungeField::from_str("12..", 4, 1));
+        let mut exec = BefungeExecution::new(FungeField::from_str("12..", 4, 1));
         exec.step();
         exec.step();
         exec.step();
@@ -1051,7 +986,7 @@ mod tests {
 
     #[test]
     fn test_write_char() {
-        let mut exec = BefungeExecution::new(BefungeField::from_str("\"a\",", 4, 1));
+        let mut exec = BefungeExecution::new(FungeField::from_str("\"a\",", 4, 1));
         exec.step();
         exec.step();
         exec.step();
